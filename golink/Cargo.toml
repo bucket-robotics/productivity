@@ -1,0 +1,24 @@
+[package]
+name = "golink"
+description = "Open `go/` from OrgOrg"
+authors.workspace = true
+categories.workspace = true
+documentation.workspace = true
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+orgorg_client = { path = "../orgorg_client" }
+productivity_config = { path = "../productivity_config" }
+anyhow.workspace = true
+argh.workspace = true
+console.workspace = true
+dialoguer.workspace = true
+open.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
