@@ -2,6 +2,34 @@
 
 Bucket's productivity tools.
 
+## `ask` CLI agent
+
+Tool to automate things using Anthropic.
+
+```
+Usage: ask [-v] [question...]
+
+Ask a question.
+
+Options:
+  -v, --verbose     verbose mode
+  --help            display usage information
+```
+
+### Installation
+
+```bash
+# To install from GitHub
+cargo install --git https://github.com/bucket-robotics/productivity.git bucket_ask
+
+# To install from a local clone of the repo
+cargo install --path ./ask
+```
+
+### Example
+
+![ask example](examples/ask.svg)
+
 ## `go/` links
 
 Tool to find and open `go/` links from [OrgOrg](orgorg.us).
@@ -24,7 +52,7 @@ Options:
 
 ```bash
 # To install from GitHub
-cargo install --git https://github.com/bucket-robotics/productivity.git
+cargo install --git https://github.com/bucket-robotics/productivity.git golink
 
 # To install from a local clone of the repo
 cargo install --path ./golink

@@ -18,9 +18,9 @@ struct Go {
 /// Attempt to open a link.
 ///
 /// If opening the link fails then just print out the URL.
-fn open_link(link: &str) -> () {
+fn open_link(link: &str) {
     if let Err(e) = open::that(link) {
-        eprintln!("Failed to open browser: {}", e);
+        eprintln!("Failed to open browser: {e}");
         println!("{link}");
     }
 }
@@ -91,7 +91,7 @@ fn main() {
         .unwrap();
 
     if let Err(e) = runtime.block_on(actual_main(go)) {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
         std::process::exit(1);
     }
 }
