@@ -30,18 +30,21 @@ fn get_system_prompt(settings: &productivity_config::Config) -> String {
     let host_info = host_info::HostInformation::new();
 
     instructions.push(
-        r"
-You are assisting users through a CLI application.
-You are a helpful and concise assistant - keep responses short and to the point.
-Format your responses for optimal terminal readability and use ASCII-based formatting.
-Adhere to common CLI conventions.
-Format code and commands clearly, provide helpful error messages, and use progressive disclosure.
-Use ASCII art judiciously.
-You can use UTF-8 emojis to make things more fun.
-Be prepared to provide help text and documentation suitable for CLI display.
-Don't retry failed actions.
-Don't apologize for errors.
-"
+        r#"
+You are assisting users through a CLI command they have run in their terminal.
+The user doesn't have the ability to respond to follow up questions.
+Use ASCII art for diagrams.
+Use UTF-8 emojis to make things more fun or to draw the user's attention to sections of output.
+Format your responses for terminal readability and use ASCII-based formatting.
+When you formulate a plan of tool uses, provide the user with a simple ASCII art diagram of the plan, but do not elaborate further.
+As you get information from tools, reevaluate the plan and provide the user with a new ASCII art diagram.
+Do not retry failed tool uses.
+Do not provide any information that the user has not requested.
+Think step by step, indicate thinking by responding with blocks starting with ">".
+Do not include extra newlines in your responses.
+You are not a chatbot, be concise and matter of fact, do not engage in conversation, omit all pleasantries, do not thank the user, never apologize.
+Act as if you are a tool, not a person.
+"#
         .trim()
         .to_string(),
     );
@@ -59,18 +62,30 @@ Don't apologize for errors.
 
     if let Ok(cwd) = std::env::current_dir() {
         instructions.push(format!(
-            "The user's current directory is `{}`.",
+            "The user's current directory is {}.",
             cwd.display()
         ));
     }
 
+    if let Ok(current_desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
+        instructions.push(format!(
+            "The user's desktop environment is {current_desktop}."
+        ));
+    }
+
     if console::colors_enabled() {
-        instructions.push("The user's terminal supports ANSI colors - can you use XML tags to denote the color to display text for example `<red>`. Use colors to increase legibility.".to_string());
+        instructions.push("The user's terminal supports ANSI colors - can you use XML tags to denote the color to display text for example \"<red>\". Use colors to increase legibility.".to_string());
+        instructions.push(
+            "You can use XML tags to make text bold or italic, \"<bold>\" will make text bold and \"<italic>\" will make text italic.".to_string(),
+        );
+        instructions.push(
+            "Use italic text to highlight file paths, commands, and tool names in your output. Use bold text if you want the user to pay particular attention to something.".to_string(),
+        );
     }
 
     if let Some(config_path) = &settings.config_file_path {
         instructions.push(format!(
-            "The user has a configuration file for the CLI tool they use to interact with you - it is located at `{config_path}`."
+            "The user has a configuration file for the CLI tool they use to interact with you - it is located at {config_path}."
         ));
     }
     if let Some(extra_system_prompt) = &settings.ask_system_prompt {
@@ -232,8 +247,10 @@ async fn actual_main(ask: Ask) -> anyhow::Result<()> {
                     };
                     content_block_state.finalize()?;
                 }
-                "message_stop" => {}
-                "message_start" | "ping" => {}
+                "message_start" | "message_stop" | "ping" => {}
+                "error" => {
+                    anyhow::bail!("Received error message: {:?}", &message);
+                }
                 _ => {
                     tracing::error!("Unknown message type in: {:?}", &message);
                 }

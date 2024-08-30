@@ -126,12 +126,12 @@ impl AnthropicClient {
         while let Some(chunk) = response.chunk().await.context("Reading chunk")? {
             let chunk_str = String::from_utf8_lossy(&chunk);
             for line in chunk_str.lines() {
-                let line = if !partial_data_buffer.is_empty() {
+                let line = if partial_data_buffer.is_empty() {
+                    line.to_string()
+                } else {
                     let new_line = format!("{}{}", &partial_data_buffer, line);
                     partial_data_buffer.clear();
                     new_line
-                } else {
-                    line.to_string()
                 };
 
                 if let Some(data) = line.strip_prefix("data: ") {

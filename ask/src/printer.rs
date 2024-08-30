@@ -13,13 +13,15 @@ pub struct Printer<W> {
 /// # Returns
 ///
 /// Whether or not the color was valid.
-fn tag_to_color(tag: &str) -> Option<console::Style> {
+fn tag_to_style(tag: &str) -> Option<console::Style> {
     Some(match tag {
         "red" => console::Style::new().red(),
         "yellow" => console::Style::new().yellow(),
         "green" => console::Style::new().green(),
         "blue" => console::Style::new().blue(),
         "cyan" => console::Style::new().cyan(),
+        "bold" => console::Style::new().bold(),
+        "italic" => console::Style::new().italic(),
         _ => return None,
     })
 }
@@ -50,13 +52,13 @@ impl<W: std::io::Write> Printer<W> {
                     let tag = &text[1..index];
 
                     let is_color_tag = if let Some(tag) = tag.strip_prefix("/") {
-                        if tag_to_color(tag).is_some() {
+                        if tag_to_style(tag).is_some() {
                             self.style = console::Style::new();
                             true
                         } else {
                             false
                         }
-                    } else if let Some(style) = tag_to_color(tag) {
+                    } else if let Some(style) = tag_to_style(tag) {
                         self.style = style;
                         true
                     } else {

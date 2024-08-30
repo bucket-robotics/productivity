@@ -101,7 +101,9 @@ impl RustTool for ReadFilesTool {
             }
 
             for file in disallowed_files {
-                response.push_str(&format!("The user did not allow you to read {file}.\n"));
+                response.push_str(&format!(
+                    "The user chose not to allow you to read {file}.\n"
+                ));
                 access_cache.allowed_read_paths.remove(&file);
             }
         }
@@ -204,7 +206,7 @@ impl RustTool for WriteFilesTool {
                 .context("From confirm")?;
             if !allow_write {
                 response.push(format!(
-                    "The user did not allow writing to {}",
+                    "The user said they did not want to you to write to {}",
                     file_path.display()
                 ));
                 continue;
