@@ -87,7 +87,7 @@ impl RustTool for ReadFilesTool {
             // Create a default selection of all paths (all allowed by default
             let defaults: Vec<bool> = paths.iter().map(|_| true).collect();
             let selection = dialoguer::MultiSelect::new()
-                .with_prompt("Files to allow the LLM to read:")
+                .with_prompt("Files to allow the LLM to read")
                 .items(&select_choices)
                 .defaults(&defaults)
                 .interact()

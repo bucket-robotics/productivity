@@ -3,7 +3,7 @@
 use anyhow::Context;
 
 use super::RustTool;
-use crate::anthropic_tools::ToolPrerequisites;
+use crate::tools::ToolPrerequisites;
 
 /// Input to the binary or script.
 #[derive(serde::Deserialize, schemars::JsonSchema)]

@@ -1,16 +1,15 @@
 use std::sync::Arc;
 
-use anthropic_client::{
-    ContentBlock, ContentBlockProcessor as _, TextContentBlock, TextOrContentVector,
-    ToolUseContentBlock,
-};
+use anthropic_client::TextOrContentVector;
 use anyhow::Context;
 use argh::FromArgs;
 
 mod anthropic_client;
-mod anthropic_tools;
 mod host_info;
+mod llm_response;
+mod ollama;
 mod printer;
+mod tools;
 
 #[derive(FromArgs)]
 /// Ask a question.
@@ -26,85 +25,132 @@ struct Ask {
 fn get_system_prompt(settings: &productivity_config::Config) -> String {
     let terminal = console::Term::stdout();
     let terminal_width = terminal.size_checked().map_or(80, |s| s.1) as usize;
-    let mut instructions = Vec::new();
+    let mut instructions = Vec::with_capacity(6);
+    let mut formatting = Vec::with_capacity(6);
+    let mut environment = Vec::with_capacity(6);
     let host_info = host_info::HostInformation::new();
 
     instructions.push(
-        r#"
-You are assisting users through a CLI command they have run in their terminal.
-The user doesn't have the ability to respond to follow up questions.
-Use ASCII art for diagrams.
-Use UTF-8 emojis to make things more fun or to draw the user's attention to sections of output.
-Format your responses for terminal readability and use ASCII-based formatting.
-When you formulate a plan of tool uses, provide the user with a simple ASCII art diagram of the plan, but do not elaborate further.
-As you get information from tools, reevaluate the plan and provide the user with a new ASCII art diagram.
-Do not retry failed tool uses.
-Do not provide any information that the user has not requested.
-Think step by step, indicate thinking by responding with blocks starting with ">".
-Do not include extra newlines in your responses.
-You are not a chatbot, be concise and matter of fact, do not engage in conversation, omit all pleasantries, do not thank the user, never apologize.
-Act as if you are a tool, not a person.
-"#
+        r"
+1. You are assisting users through a CLI command they have run in their terminal.
+2. The user doesn't have the ability to respond to follow up questions.
+4. As you get information from tools, reevaluate the plan and provide the user with a summary of the new plan.
+5. Do not retry failed tool uses.
+6. Do not provide any information that the user has not requested.
+7. Think step by step.
+8. Information about the user's environment is available in the <environment> tags, use tools when necessary to gather more information.
+9. When a README.md file is present in a directory a user mentions or a directory that is relevant, it should be read to gather context.
+10. Act as if you are a tool, not a person, omit all pleasantries, do not thank the user, never apologize, use the <example> tags to learn what good responses look like.
+<example>
+<environment>The user's current directory is /foo</environment>
+<question>Update my dependencies</question>
+<thought>
+Plan:
+1. Find files listing dependencies.
+2. Read files listing dependencies.
+3. Check the versions of the dependencies.
+4. Write the new versions to the files that specify dependencies.
+</thought>
+<green>Plan:</green> Read <italic>/foo</italic> -> Read files -> Check versions -> Write files
+</example>
+<example>
+<environment>The user's current directory is /home/bob/proj</environment>
+<question>What's in this dir?</question>
+<thought>
+Plan:
+1. Use a tool to list files in /home/bob/proj
+</thought>
+<green>Plan:</green> Read <italic>/home/bob/proj</italic>
+📁 proj
+  📄 package.json
+  📁 src
+  📄 README.md
+</example>
+"
         .trim()
         .to_string(),
     );
-    instructions.push(format!(
+    formatting.push(r#"
+        Format your responses for terminal readability and use ASCII-based formatting.
+        Structure your thoughts XML, wrap thoughts in "<thought>" tags, follow up questions in "<followup>" tags, and everything else in "<text>" tags.
+        If you have successfully accomplished the task the user gave you then include a "<success/>" tag in your last response, if not include a "<failure/>" tag.
+        Use ASCII art for diagrams.
+        Use UTF-8 emojis to make things more fun or to draw the user's attention to sections of output.
+    "#.trim().to_string());
+    formatting.push(format!(
         "The width of the user's terminal is {terminal_width} characters."
     ));
-    instructions.push(format!(
+
+    if console::colors_enabled() {
+        formatting.push("The user's terminal supports ANSI colors - can you use \"<red>\", \"<green>\", or \"<yellow>\" to color text, use colors to increase legibility, use red only to indicate errors.".to_string());
+        formatting.push(
+            "You can use XML tags to make text bold or italic, \"<bold>\" will make text bold and \"<italic>\" will make text italic.".to_string(),
+        );
+        formatting.push(
+            "Use italic text to highlight file paths, commands, and tool names in your output. Use bold text if you want the user to pay particular attention to something.".to_string(),
+        );
+    }
+
+    environment.push(format!(
         "The user's operating system is {} and their CPU architecture is {}.",
         &host_info.os, &host_info.architecture
     ));
-    instructions.push(format!(
+    environment.push(format!(
         "The current date and time is {}",
         chrono::Local::now().format("%Y-%m-%d %H:%M")
     ));
 
     if let Ok(cwd) = std::env::current_dir() {
-        instructions.push(format!(
+        environment.push(format!(
             "The user's current directory is {}.",
             cwd.display()
         ));
     }
 
     if let Ok(current_desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
-        instructions.push(format!(
+        environment.push(format!(
             "The user's desktop environment is {current_desktop}."
         ));
     }
 
-    if console::colors_enabled() {
-        instructions.push("The user's terminal supports ANSI colors - can you use XML tags to denote the color to display text for example \"<red>\". Use colors to increase legibility.".to_string());
-        instructions.push(
-            "You can use XML tags to make text bold or italic, \"<bold>\" will make text bold and \"<italic>\" will make text italic.".to_string(),
-        );
-        instructions.push(
-            "Use italic text to highlight file paths, commands, and tool names in your output. Use bold text if you want the user to pay particular attention to something.".to_string(),
-        );
-    }
-
     if let Some(config_path) = &settings.config_file_path {
-        instructions.push(format!(
-            "The user has a configuration file for the CLI tool they use to interact with you - it is located at {config_path}."
+        environment.push(format!(
+            "The user has a configuration file for the CLI tool they use to interact with you, the config file is located at {config_path}."
         ));
     }
+
     if let Some(extra_system_prompt) = &settings.ask_system_prompt {
+        instructions.push("\n".to_string());
         instructions.push(extra_system_prompt.clone());
     }
 
-    instructions.join("\n")
+    format!(
+        "<instruction>{}</instruction>\n<formatting>{}</formatting>\n<environment>{}</environment>",
+        instructions.join("\n"),
+        formatting.join("\n"),
+        environment.join("\n"),
+    )
 }
 
 async fn actual_main(ask: Ask) -> anyhow::Result<()> {
     let config = productivity_config::Config::get_or_default().context("Reading config")?;
     let client = std::sync::Arc::new(anthropic_client::AnthropicClient {
         base_url: config.get_anthropic_url_base(),
-        token: config.get_anthropic_api_key().context("Getting API key")?,
+        token: if let Some(token) = config.get_anthropic_api_key() {
+            token
+        } else {
+            anyhow::bail!(
+                "Anthropic API key is not set - configure it in {}",
+                config
+                    .config_file_path
+                    .unwrap_or_else(|| String::from("the config file"))
+            );
+        },
     });
 
-    let mut tool_map = std::collections::HashMap::<String, Arc<dyn anthropic_tools::Tool>>::new();
+    let mut tool_map = std::collections::HashMap::<String, Arc<dyn tools::Tool>>::new();
     let mut tool_definitions = vec![];
-    for tool in anthropic_tools::rust_tools::get_rust_tools() {
+    for tool in tools::rust_tools::get_rust_tools() {
         let definition = tool.get_definition();
         tool_map.insert(definition.name.to_string(), tool);
         tool_definitions.push(definition);
@@ -117,147 +163,50 @@ async fn actual_main(ask: Ask) -> anyhow::Result<()> {
         }],
         system: Some(get_system_prompt(&config)),
         tools: tool_definitions,
+        stream: false,
         ..Default::default()
     };
 
     let mut new_message = true;
-
     while new_message {
-        let mut content_blocks = std::collections::BTreeMap::<i64, ContentBlock>::new();
         new_message = false;
 
-        let (tx, mut rx) =
-            tokio::sync::mpsc::channel::<anthropic_client::AnthropicStreamResponse>(128);
-        let query = original_query.clone();
-        let client_clone = client.clone();
-        let response =
-            tokio::spawn(async move { client_clone.query_anthropic(query.clone(), tx).await });
+        let (response, mut new_query) = client
+            .clone()
+            .query_anthropic(original_query.clone())
+            .await?;
 
-        while let Some(message) = rx.recv().await {
-            tracing::debug!("Received message: {:?}", &message);
-
-            match message.r#type.as_str() {
-                "content_block_delta" => {
-                    let Some(index) = message.index else {
-                        tracing::error!("No index in delta message: {:?}", &message);
-                        continue;
-                    };
-                    let Some(delta) = message.delta else {
-                        tracing::error!("No delta in delta message: {:?}", &message);
-                        continue;
-                    };
-                    let Some(content_block_state) = content_blocks.get_mut(&index) else {
-                        tracing::error!("No content block for index {index}");
-                        continue;
-                    };
-                    content_block_state.process_delta(delta)?;
-                }
-                "message_delta" => {
-                    let Some(ref delta) = message.delta else {
-                        tracing::error!("No delta in message: {:?}", &message);
-                        continue;
-                    };
-                    if let Some(stop_reason) = delta.get("stop_reason") {
-                        match stop_reason.as_str().unwrap() {
-                            "end_turn" | "stop_sequence" => {
-                                break;
-                            }
-                            "max_tokens" => {
-                                anyhow::bail!("Maximum token count exceeded");
-                            }
-                            "tool_use" => {
-                                let mut assistant_message_content = vec![];
-                                let mut user_message_content = vec![];
-                                for content_block in content_blocks.values() {
-                                    assistant_message_content
-                                        .push(content_block.get_original_content_block()?);
-                                    if let Some(user_content) =
-                                        content_block.get_user_content_block().await
-                                    {
-                                        user_message_content.push(user_content?);
-                                    }
-                                }
-                                original_query
-                                    .messages
-                                    .push(anthropic_client::AnthropicMessage {
-                                        role: "assistant".to_string(),
-                                        content: TextOrContentVector::Content(
-                                            assistant_message_content,
-                                        ),
-                                    });
-
-                                original_query
-                                    .messages
-                                    .push(anthropic_client::AnthropicMessage {
-                                        role: "user".to_string(),
-                                        content: TextOrContentVector::Content(user_message_content),
-                                    });
-
-                                new_message = true;
-                            }
-                            _ => {
-                                tracing::error!("Unknown stop reason: {:?}", &stop_reason);
-                            }
-                        }
-                    }
-                }
-                "content_block_start" => {
-                    let Some(ref content_block) = message.content_block else {
-                        continue;
-                    };
-                    let Some(content_type) = content_block.get("type") else {
-                        continue;
-                    };
-                    let Some(index) = message.index else {
-                        anyhow::bail!("No index in message: {:?}", message);
-                    };
-                    content_blocks.insert(
-                        index,
-                        match content_type.as_str().unwrap() {
-                            "text" => ContentBlock::Text(TextContentBlock::new(content_block)?),
-                            "tool_use" => {
-                                let tool_name = content_block
-                                    .get("name")
-                                    .context("Tool name not provided")?
-                                    .as_str()
-                                    .context("Tool name was not a string")?;
-                                let tool = tool_map.get(tool_name).with_context(|| {
-                                    format!("Could not find tool with name {tool_name}")
-                                })?;
-                                ContentBlock::ToolUse(ToolUseContentBlock::new(
-                                    tool.clone(),
-                                    content_block,
-                                )?)
-                            }
-                            _ => {
-                                tracing::error!("Unknown content block type: {:?}", &&content_type);
-                                continue;
-                            }
-                        },
-                    );
-                }
-                "content_block_stop" => {
-                    let Some(index) = message.index else {
-                        tracing::error!("No index in delta message: {:?}", &message);
-                        continue;
-                    };
-                    let Some(content_block_state) = content_blocks.get_mut(&index) else {
-                        tracing::error!("No content block for index {index}");
-                        continue;
-                    };
-                    content_block_state.finalize()?;
-                }
-                "message_start" | "message_stop" | "ping" => {}
-                "error" => {
-                    anyhow::bail!("Received error message: {:?}", &message);
-                }
-                _ => {
-                    tracing::error!("Unknown message type in: {:?}", &message);
-                }
-            }
+        // Print the communication
+        for content in &response.text {
+            print!("{}", content.get_terminal_style().apply_to(&content.text));
         }
 
-        response.await?.context("During query")?;
+        // If tool use is requested then run the tools and send a new message
+        if !response.tool_invocations.is_empty() {
+            println!("----------");
+            let mut user_content = Vec::with_capacity(response.tool_invocations.len());
+            for invocation in response.tool_invocations {
+                let tool = tool_map
+                    .get(&invocation.name)
+                    .context("Tool not found")?
+                    .clone();
+                let tool_response = tool.run(invocation.input).await?;
+                user_content.push(anthropic_client::AnthropicContentBlock::ToolResult {
+                    tool_use_id: invocation.id,
+                    content: tool_response,
+                });
+            }
+
+            new_query.messages.push(anthropic_client::AnthropicMessage {
+                role: "user".to_string(),
+                content: TextOrContentVector::Content(user_content),
+            });
+
+            // Send a new message with the tool results
+            new_message = true;
+        }
+
+        original_query = new_query;
     }
 
     // Make sure the output ends in a newline
@@ -293,7 +242,7 @@ fn main() {
     set_up_tracing(ask.verbose);
 
     if ask.question.is_empty() {
-        tracing::error!("No question provided (TODO provide a little TUI)");
+        tracing::error!("No question provided");
         std::process::exit(1);
     }
 
@@ -303,7 +252,7 @@ fn main() {
         .unwrap();
 
     if let Err(e) = runtime.block_on(actual_main(ask)) {
-        tracing::error!("Error: {e}");
+        tracing::error!("Error: {}", e);
         std::process::exit(1);
     }
 }

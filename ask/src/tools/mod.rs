@@ -12,6 +12,7 @@ mod http_request;
 mod open;
 mod package_manager;
 mod software_versions;
+mod terraform;
 
 /// A tool definition.
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]

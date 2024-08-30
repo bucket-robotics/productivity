@@ -6,6 +6,7 @@ pub fn get_rust_tools() -> Vec<Arc<dyn super::Tool>> {
         Arc::new(super::filesystem::ReadFilesTool),
         Arc::new(super::filesystem::WriteFilesTool),
         Arc::new(super::http_request::HttpGetTool),
+        Arc::new(super::terraform::TerraformPlanTool),
         Arc::new(super::open::OpenTool),
         Arc::new(super::package_manager::PackageManagerTool::new()),
         Arc::new(super::software_versions::SoftwareVersionsTool::new()),
@@ -16,12 +17,12 @@ pub fn get_rust_tools() -> Vec<Arc<dyn super::Tool>> {
         )),
         Arc::new(super::binary_tool::BinaryTool::new_with_output(
             "tar",
-            "Run `tar` with the provided arguments.",
+            "Run `tar` - a CLI tool to compress and decompress tar files - with the provided arguments.",
             false,
         )),
         Arc::new(super::binary_tool::BinaryTool::new_with_output(
             "unzip",
-            "Run `unzip` with the provided arguments.",
+            "Run `unzip` - a CLI tool to decompress zip files - with the provided arguments.",
             false,
         )),
     ]

@@ -1,8 +1,10 @@
-use std::sync::Arc;
+use core::str;
 
 use anyhow::Context;
+use quick_xml::events::Event;
 
-use crate::anthropic_tools::{Tool, ToolDefinition};
+use crate::llm_response::{LlmResponse, TextOutput, ToolInvocation};
+use crate::tools::ToolDefinition;
 
 /// A query for the Anthropic messages API.
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
@@ -81,7 +83,7 @@ pub struct AnthropicClient {
 }
 
 /// The response the Anthropic API returns from a stream.
-#[derive(serde::Deserialize, serde::Serialize, Debug)]
+#[derive(serde::Deserialize, Debug)]
 pub struct AnthropicStreamResponse {
     pub r#type: String,
     pub index: Option<i64>,
@@ -89,12 +91,243 @@ pub struct AnthropicStreamResponse {
     pub delta: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
+/// The response the Anthropic API returns.
+#[derive(serde::Deserialize, Debug)]
+pub struct AnthropicResponse {
+    /// The content blocks.
+    pub content: Vec<AnthropicContentBlock>,
+    /// The ID of the message.
+    pub id: String,
+    /// The model used to generate the response.
+    pub model: String,
+    /// The role of the responder.
+    pub role: String,
+    /// The reason the response stopped.
+    pub stop_reason: String,
+    /// The stop sequence.
+    pub stop_sequence: Option<String>,
+    /// The type of the response.
+    pub r#type: String,
+    /// Usage statistics.
+    pub usage: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum TagType {
+    Thought,
+    Text,
+    Followup,
+}
+
+struct TextAccumulator<'a> {
+    output: &'a mut Vec<TextOutput>,
+    text: String,
+    tag_stack: Vec<TagType>,
+    bold: bool,
+    italic: bool,
+    color: Option<String>,
+    did_skip: bool,
+}
+
+impl TextAccumulator<'_> {
+    /// Wrap an output vector in a text accumulator.
+    fn new(output: &mut Vec<TextOutput>) -> TextAccumulator {
+        TextAccumulator {
+            output,
+            text: String::with_capacity(8),
+            bold: false,
+            tag_stack: Vec::with_capacity(2),
+            italic: false,
+            color: None,
+            did_skip: false,
+        }
+    }
+
+    /// Push a block.
+    fn push(&mut self) {
+        let should_skip = self.tag_stack.iter().any(|x| match x {
+            TagType::Thought | TagType::Followup => true,
+            _ => false,
+        });
+        if should_skip {
+            self.text = String::with_capacity(8);
+            self.did_skip = true;
+            return;
+        }
+
+        if !self.text.is_empty() {
+            let mut output = TextOutput {
+                bold: self.bold,
+                italic: self.italic,
+                color: self.color.clone(),
+                text: String::with_capacity(8),
+            };
+            std::mem::swap(&mut self.text, &mut output.text);
+            self.output.push(output);
+        }
+    }
+
+    fn push_tag(&mut self, tag: TagType) {
+        self.push();
+        self.tag_stack.push(tag);
+    }
+
+    fn pop_tag_of_type(&mut self, tag: TagType) -> anyhow::Result<()> {
+        self.push();
+
+        if let Some(last) = self.tag_stack.pop() {
+            if last != tag {
+                anyhow::bail!("Expected tag {:?}, got {:?}", tag, last);
+            }
+        } else {
+            anyhow::bail!("Expected tag {:?} to be in the stack, got nothing", tag);
+        }
+        Ok(())
+    }
+
+    fn set_bold(&mut self, state: bool) {
+        if self.bold == state {
+            return;
+        }
+        self.push();
+        self.bold = state;
+    }
+
+    fn set_italic(&mut self, state: bool) {
+        if self.italic == state {
+            return;
+        }
+        self.push();
+        self.italic = state;
+    }
+
+    fn set_color(&mut self, color: Option<String>) {
+        if self.color == color {
+            return;
+        }
+        self.push();
+        self.color = color;
+    }
+
+    fn push_text(&mut self, text: &str) {
+        self.text.push_str(if self.did_skip {
+            self.did_skip = false;
+            text.trim_start()
+        } else {
+            text
+        });
+    }
+}
+
+fn parse_text(text: &str, output: &mut Vec<TextOutput>) -> anyhow::Result<()> {
+    let mut reader = quick_xml::reader::Reader::from_str(text);
+    let mut writer = TextAccumulator::new(output);
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Err(e) => panic!("Error at position {}: {:?}", reader.error_position(), e),
+            // exits the loop when reaching end of file
+            Ok(Event::Eof) => {
+                // Make sure the content ends in a newline.
+                writer.push_text("\n");
+                break;
+            }
+
+            Ok(Event::Start(e)) => match e.name().as_ref() {
+                b"thought" => {
+                    writer.push_tag(TagType::Thought);
+                }
+                b"followup" => {
+                    writer.push_tag(TagType::Followup);
+                }
+                b"text" => {
+                    writer.push_tag(TagType::Text);
+                }
+                b"bold" => {
+                    writer.set_bold(true);
+                }
+                b"italic" => {
+                    writer.set_italic(true);
+                }
+                b"red" => {
+                    writer.set_color(Some("red".to_string()));
+                }
+                b"green" => {
+                    writer.set_color(Some("green".to_string()));
+                }
+                b"yellow" => {
+                    writer.set_color(Some("yellow".to_string()));
+                }
+                _ => writer.push_text(&format!("<{}>", std::str::from_utf8(&e).unwrap())),
+            },
+            Ok(Event::End(e)) => match e.name().as_ref() {
+                b"thought" => {
+                    writer.pop_tag_of_type(TagType::Thought)?;
+                }
+                b"followup" => {
+                    writer.pop_tag_of_type(TagType::Followup)?;
+                }
+                b"text" => {
+                    writer.pop_tag_of_type(TagType::Text)?;
+                }
+                b"bold" => {
+                    writer.set_bold(false);
+                }
+                b"italic" => {
+                    writer.set_italic(false);
+                }
+                b"red" | b"green" | b"yellow" => {
+                    writer.set_color(None);
+                }
+                _ => writer.push_text(&format!("</{}>", std::str::from_utf8(&e).unwrap())),
+            },
+            Ok(e) => writer.push_text(std::str::from_utf8(&e).unwrap()),
+        }
+
+        buf.clear();
+    }
+
+    // Make sure any remaining content is flushed
+    writer.push();
+
+    Ok(())
+}
+
+/// Convert an Anthropic response to the internal response representation.
+fn anthropic_to_internal(response: AnthropicResponse) -> anyhow::Result<LlmResponse> {
+    let mut text_blocks = Vec::with_capacity(2);
+    let mut raw_text = Vec::with_capacity(2);
+    let mut tool_invocations = Vec::new();
+
+    for content_block in response.content {
+        match content_block {
+            AnthropicContentBlock::Text { text } => {
+                raw_text.push(text.clone());
+                parse_text(&text, &mut text_blocks)?;
+            }
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                tool_invocations.push(ToolInvocation { id, name, input });
+            }
+            _ => {
+                anyhow::bail!("Unsupported content block: {:?}", content_block);
+            }
+        }
+    }
+
+    Ok(LlmResponse {
+        text: text_blocks,
+        raw_text,
+        tool_invocations,
+    })
+}
+
 impl AnthropicClient {
+    /// Query the Anthropic API.
     pub async fn query_anthropic(
         self: std::sync::Arc<Self>,
-        query: AnthropicQuery,
-        message_queue: tokio::sync::mpsc::Sender<AnthropicStreamResponse>,
-    ) -> anyhow::Result<()> {
+        mut query: AnthropicQuery,
+    ) -> anyhow::Result<(LlmResponse, AnthropicQuery)> {
         if tracing::enabled!(tracing::Level::INFO) {
             if let Ok(serialized_query) =
                 serde_json::to_string_pretty(&query).context("Serializing query")
@@ -104,314 +337,36 @@ impl AnthropicClient {
         }
 
         let client = reqwest::Client::new();
-        let mut response = client
+        let response = client
             .post(&format!("{}/v1/messages", self.base_url))
             .header("x-api-key", &self.token)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
-            .header("Accept", "text/event-stream")
             .json(&query)
             .send()
             .await
             .context("Querying Anthropic")?;
 
-        assert!(query.stream, "We only support streaming queries right now");
+        assert!(
+            !query.stream,
+            "We don't support streaming queries right now"
+        );
+
         if !response.status().is_success() {
             let body: serde_json::Value = response.json().await.context("Reading response body")?;
             tracing::error!("Error querying API: {body:?}");
             anyhow::bail!("Failed to query Anthropic: {:?}", body);
         }
 
-        let mut partial_data_buffer = String::new();
-        while let Some(chunk) = response.chunk().await.context("Reading chunk")? {
-            let chunk_str = String::from_utf8_lossy(&chunk);
-            for line in chunk_str.lines() {
-                let line = if partial_data_buffer.is_empty() {
-                    line.to_string()
-                } else {
-                    let new_line = format!("{}{}", &partial_data_buffer, line);
-                    partial_data_buffer.clear();
-                    new_line
-                };
+        let response: AnthropicResponse =
+            response.json().await.context("Deserializing response")?;
 
-                if let Some(data) = line.strip_prefix("data: ") {
-                    let Ok(response) = serde_json::from_str::<AnthropicStreamResponse>(data)
-                        .context("Parsing response")
-                    else {
-                        partial_data_buffer = line.to_string();
-                        continue;
-                    };
-                    let should_break = response.r#type == "message_stop";
-                    message_queue
-                        .send(response)
-                        .await
-                        .context("Sending to message queue")?;
+        query.messages.push(AnthropicMessage {
+            role: "assistant".to_string(),
+            content: TextOrContentVector::Content(response.content.clone()),
+        });
 
-                    if should_break {
-                        break;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// A content block processor.
-///
-/// Implementors of this trait are responsible for processing content block deltas as they stream in.
-pub trait ContentBlockProcessor {
-    /// Process a delta message.
-    fn process_delta(
-        &mut self,
-        delta: serde_json::Map<String, serde_json::Value>,
-    ) -> anyhow::Result<()>;
-
-    /// Finalize the content block - e.g. flush the output.
-    fn finalize(&mut self) -> anyhow::Result<()>;
-
-    /// Get the content block to put back into the messages stream - e.g. a `tool_use`.
-    fn get_original_content_block(&self) -> anyhow::Result<AnthropicContentBlock>;
-    /// Get the content block to put back into the messages stream - e.g. a `tool_result`.
-    async fn get_user_content_block(&self) -> Option<anyhow::Result<AnthropicContentBlock>>;
-}
-
-/// A text content block.
-pub struct TextContentBlock {
-    printer: super::printer::Printer<std::io::Stdout>,
-    accumulated_text: String,
-}
-
-impl TextContentBlock {
-    /// Construct a text content block.
-    ///
-    /// # Arguments
-    /// `content_block` - The content block to construct from, for example:
-    /// ```json
-    /// {
-    ///     "text": String(""),
-    ///     "type": String("text"),
-    /// },
-    /// ```
-    pub fn new(content_block: &serde_json::Map<String, serde_json::Value>) -> anyhow::Result<Self> {
-        let mut printer = super::printer::Printer::new(std::io::stdout());
-        let mut accumulated_text = String::with_capacity(64);
-        if let Some(text) = content_block.get("text") {
-            let text = text.as_str().context("Text field was not a string")?;
-            accumulated_text.push_str(text);
-            printer.print(text)?;
-        }
-
-        Ok(Self {
-            printer,
-            accumulated_text,
-        })
-    }
-}
-
-impl ContentBlockProcessor for TextContentBlock {
-    fn process_delta(
-        &mut self,
-        delta: serde_json::Map<String, serde_json::Value>,
-    ) -> anyhow::Result<()> {
-        let delta_type = delta.get("type").context("No type in the delta")?;
-        if delta_type.as_str().context("Type is not a string")? != "text_delta" {
-            return Ok(());
-        }
-
-        let text = delta
-            .get("text")
-            .context("No text in the delta")?
-            .as_str()
-            .context("Text is not a string")?;
-
-        self.accumulated_text.push_str(text);
-        self.printer.print(text)?;
-        Ok(())
-    }
-
-    fn finalize(&mut self) -> anyhow::Result<()> {
-        self.printer.flush();
-        Ok(())
-    }
-
-    fn get_original_content_block(&self) -> anyhow::Result<AnthropicContentBlock> {
-        Ok(AnthropicContentBlock::Text {
-            text: self.accumulated_text.clone(),
-        })
-    }
-
-    async fn get_user_content_block(&self) -> Option<anyhow::Result<AnthropicContentBlock>> {
-        None
-    }
-}
-
-/// A tool use content block.
-pub struct ToolUseContentBlock {
-    /// ID of the tool invocation.
-    id: String,
-    /// Name of the tool being called.
-    name: String,
-    /// The implementation of the tool being called.
-    tool: Arc<dyn Tool>,
-    /// Accumulated JSON for the tool invocation.
-    accumulated_json: String,
-}
-
-impl ToolUseContentBlock {
-    pub fn new(
-        tool: Arc<dyn Tool>,
-        content_block: &serde_json::Map<String, serde_json::Value>,
-    ) -> anyhow::Result<Self> {
-        let Some(id) = content_block.get("id") else {
-            anyhow::bail!("No ID in tool invocation");
-        };
-        let Some(name) = content_block.get("name") else {
-            anyhow::bail!("No Name in tool invocation");
-        };
-        Ok(Self {
-            name: name.as_str().context("Name is not a string")?.to_string(),
-            id: id.as_str().context("ID is not a string")?.to_string(),
-            tool,
-            accumulated_json: String::with_capacity(64),
-        })
-    }
-
-    fn get_input_value(&self) -> anyhow::Result<serde_json::Value> {
-        serde_json::from_str(&self.accumulated_json).with_context(|| {
-            format!(
-                "Failed to parse accumulated JSON: {}",
-                &self.accumulated_json
-            )
-        })
-    }
-
-    /// Invoke the underlying tool using the accumulated JSON.
-    async fn invoke_tool(&self) -> anyhow::Result<String> {
-        let prereq = self.tool.get_prequisites();
-        for binary in &prereq.binaries {
-            // Check if the binary is in the PATH.
-            if which::which(binary).is_err() {
-                tracing::warn!("Tried in call binary that is not installed: {}", &binary);
-                return Err(anyhow::anyhow!(
-                    "Binary {:?} not found in PATH - you can suggest that the user installs it or attempt to install it yourself using a tool",
-                    binary
-                ));
-            }
-        }
-        tracing::info!(
-            "Invoking tool: {:?}, Input is:\n{}",
-            &self.name,
-            &self.accumulated_json
-        );
-        let result = self
-            .tool
-            .clone()
-            .run(self.get_input_value().context("Parsing tool input")?)
-            .await;
-        if let Err(e) = &result {
-            eprintln!("Tool invocation failed: {e:?}");
-        }
-
-        result
-    }
-}
-
-impl ContentBlockProcessor for ToolUseContentBlock {
-    fn process_delta(
-        &mut self,
-        delta: serde_json::Map<String, serde_json::Value>,
-    ) -> anyhow::Result<()> {
-        let delta_type = delta.get("type").context("No type in the delta")?;
-        if delta_type
-            .as_str()
-            .context("Type is not an input_json_delta")?
-            != "input_json_delta"
-        {
-            return Ok(());
-        }
-
-        let partial_json = delta
-            .get("partial_json")
-            .context("No partial_json in the delta")?;
-
-        self.accumulated_json.push_str(
-            partial_json
-                .as_str()
-                .context("partial_json wasn't a string")?,
-        );
-
-        Ok(())
-    }
-
-    fn finalize(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn get_original_content_block(&self) -> anyhow::Result<AnthropicContentBlock> {
-        Ok(AnthropicContentBlock::ToolUse {
-            id: self.id.clone(),
-            name: self.name.clone(),
-            input: self.get_input_value()?,
-        })
-    }
-
-    async fn get_user_content_block(&self) -> Option<anyhow::Result<AnthropicContentBlock>> {
-        let content = match self
-            .invoke_tool()
-            .await
-            .with_context(|| format!("Invoking {}", self.name))
-        {
-            Ok(content) => content,
-            Err(e) => {
-                tracing::error!("Error: {}", &e);
-                format!("An error occured invoking the tool: {e}")
-            }
-        };
-
-        Some(Ok(AnthropicContentBlock::ToolResult {
-            tool_use_id: self.id.clone(),
-            content,
-        }))
-    }
-}
-
-/// A content block that can be iteratively processed as data comes in.
-pub enum ContentBlock {
-    Text(TextContentBlock),
-    ToolUse(ToolUseContentBlock),
-}
-
-impl ContentBlockProcessor for ContentBlock {
-    fn process_delta(
-        &mut self,
-        delta: serde_json::Map<String, serde_json::Value>,
-    ) -> anyhow::Result<()> {
-        match self {
-            ContentBlock::Text(block) => block.process_delta(delta),
-            ContentBlock::ToolUse(block) => block.process_delta(delta),
-        }
-    }
-
-    fn finalize(&mut self) -> anyhow::Result<()> {
-        match self {
-            ContentBlock::Text(block) => block.finalize(),
-            ContentBlock::ToolUse(block) => block.finalize(),
-        }
-    }
-
-    fn get_original_content_block(&self) -> anyhow::Result<AnthropicContentBlock> {
-        match self {
-            ContentBlock::Text(block) => block.get_original_content_block(),
-            ContentBlock::ToolUse(block) => block.get_original_content_block(),
-        }
-    }
-
-    async fn get_user_content_block(&self) -> Option<anyhow::Result<AnthropicContentBlock>> {
-        match self {
-            ContentBlock::Text(block) => block.get_user_content_block().await,
-            ContentBlock::ToolUse(block) => block.get_user_content_block().await,
-        }
+        let internal_response = anthropic_to_internal(response)?;
+        Ok((internal_response, query))
     }
 }
