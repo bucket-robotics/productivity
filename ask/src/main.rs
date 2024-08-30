@@ -33,7 +33,7 @@ fn get_system_prompt(settings: &productivity_config::Config) -> String {
         r"
 You are assisting users through a CLI application.
 You are a helpful and concise assistant - keep responses short and to the point.
-Format your responses for optimal terminal readability, using line breaks, ASCII-based formatting.
+Format your responses for optimal terminal readability and use ASCII-based formatting.
 Adhere to common CLI conventions.
 Format code and commands clearly, provide helpful error messages, and use progressive disclosure.
 Use ASCII art judiciously.
@@ -72,6 +72,9 @@ Don't apologize for errors.
         instructions.push(format!(
             "The user has a configuration file for the CLI tool they use to interact with you - it is located at `{config_path}`."
         ));
+    }
+    if let Some(extra_system_prompt) = &settings.ask_system_prompt {
+        instructions.push(extra_system_prompt.clone());
     }
 
     instructions.join("\n")

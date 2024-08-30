@@ -19,6 +19,8 @@ pub struct Config {
     pub anthropic_url_base: Option<String>,
     /// The API key to use for Anthropic.
     pub anthropic_api_key: Option<String>,
+    /// Extra system prompt content for the `ask` tool.
+    pub ask_system_prompt: Option<String>,
 }
 
 impl Config {
