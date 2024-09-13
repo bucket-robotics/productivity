@@ -2,6 +2,44 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
+/// The available LLM providers.
+#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+#[serde(tag = "type")]
+pub enum LlmProvider {
+    /// The Anthropic API.
+    Anthropic {
+        /// The API key to use.
+        api_key: String,
+    },
+    /// The Ollama API.
+    Ollama {
+        /// The base URL for the API.
+        url_base: Option<String>,
+        /// The model to use.
+        model: Option<String>,
+    },
+}
+
+impl Default for LlmProvider {
+    fn default() -> Self {
+        Self::Anthropic {
+            api_key: String::new(),
+        }
+    }
+}
+
+impl LlmProvider {
+    /// Get the base URL for the provider.
+    pub fn get_url_base(&self) -> &str {
+        match self {
+            Self::Anthropic { .. } => "https://api.anthropic.com",
+            Self::Ollama { url_base, .. } => url_base
+                .as_ref()
+                .map_or("http://localhost:11434", String::as_str),
+        }
+    }
+}
+
 /// Configuration for productivity CLI tools.
 #[derive(serde::Deserialize, serde::Serialize, Debug, Default)]
 pub struct Config {
@@ -15,10 +53,8 @@ pub struct Config {
     pub orgorg_url_base: Option<String>,
     /// The API key to use for `OrgOrg`.
     pub orgorg_api_key: Option<String>,
-    /// The base URL for the Anthropic API.
-    pub anthropic_url_base: Option<String>,
-    /// The API key to use for Anthropic.
-    pub anthropic_api_key: Option<String>,
+    /// The LLM provider to use.
+    pub llm_provider: LlmProvider,
     /// Extra system prompt content for the `ask` tool.
     pub ask_system_prompt: Option<String>,
 }
@@ -77,21 +113,5 @@ impl Config {
         self.orgorg_url_base
             .clone()
             .unwrap_or_else(|| orgorg_client::DEFAULT_URL_BASE.to_string())
-    }
-
-    /// Get the API key to use for Anthropic.
-    #[must_use]
-    pub fn get_anthropic_api_key(&self) -> Option<String> {
-        self.anthropic_api_key
-            .clone()
-            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-    }
-
-    /// Get the base URL for the Anthropic API.
-    #[must_use]
-    pub fn get_anthropic_url_base(&self) -> String {
-        self.anthropic_url_base
-            .clone()
-            .unwrap_or_else(|| "https://api.anthropic.com".to_string())
     }
 }

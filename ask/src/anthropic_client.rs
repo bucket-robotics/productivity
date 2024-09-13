@@ -1,9 +1,8 @@
 use core::str;
 
 use anyhow::Context;
-use quick_xml::events::Event;
 
-use crate::llm_response::{LlmResponse, TextOutput, ToolInvocation};
+use crate::llm_client::{LlmResponse, ToolInvocation};
 use crate::tools::ToolDefinition;
 
 /// A query for the Anthropic messages API.
@@ -84,6 +83,7 @@ pub struct AnthropicClient {
 
 /// The response the Anthropic API returns from a stream.
 #[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
 pub struct AnthropicStreamResponse {
     pub r#type: String,
     pub index: Option<i64>,
@@ -93,6 +93,7 @@ pub struct AnthropicStreamResponse {
 
 /// The response the Anthropic API returns.
 #[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
 pub struct AnthropicResponse {
     /// The content blocks.
     pub content: Vec<AnthropicContentBlock>,
@@ -112,199 +113,15 @@ pub struct AnthropicResponse {
     pub usage: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum TagType {
-    Thought,
-    Text,
-    Followup,
-}
-
-struct TextAccumulator<'a> {
-    output: &'a mut Vec<TextOutput>,
-    text: String,
-    tag_stack: Vec<TagType>,
-    bold: bool,
-    italic: bool,
-    color: Option<String>,
-    did_skip: bool,
-}
-
-impl TextAccumulator<'_> {
-    /// Wrap an output vector in a text accumulator.
-    fn new(output: &mut Vec<TextOutput>) -> TextAccumulator {
-        TextAccumulator {
-            output,
-            text: String::with_capacity(8),
-            bold: false,
-            tag_stack: Vec::with_capacity(2),
-            italic: false,
-            color: None,
-            did_skip: false,
-        }
-    }
-
-    /// Push a block.
-    fn push(&mut self) {
-        let should_skip = self.tag_stack.iter().any(|x| match x {
-            TagType::Thought | TagType::Followup => true,
-            _ => false,
-        });
-        if should_skip {
-            self.text = String::with_capacity(8);
-            self.did_skip = true;
-            return;
-        }
-
-        if !self.text.is_empty() {
-            let mut output = TextOutput {
-                bold: self.bold,
-                italic: self.italic,
-                color: self.color.clone(),
-                text: String::with_capacity(8),
-            };
-            std::mem::swap(&mut self.text, &mut output.text);
-            self.output.push(output);
-        }
-    }
-
-    fn push_tag(&mut self, tag: TagType) {
-        self.push();
-        self.tag_stack.push(tag);
-    }
-
-    fn pop_tag_of_type(&mut self, tag: TagType) -> anyhow::Result<()> {
-        self.push();
-
-        if let Some(last) = self.tag_stack.pop() {
-            if last != tag {
-                anyhow::bail!("Expected tag {:?}, got {:?}", tag, last);
-            }
-        } else {
-            anyhow::bail!("Expected tag {:?} to be in the stack, got nothing", tag);
-        }
-        Ok(())
-    }
-
-    fn set_bold(&mut self, state: bool) {
-        if self.bold == state {
-            return;
-        }
-        self.push();
-        self.bold = state;
-    }
-
-    fn set_italic(&mut self, state: bool) {
-        if self.italic == state {
-            return;
-        }
-        self.push();
-        self.italic = state;
-    }
-
-    fn set_color(&mut self, color: Option<String>) {
-        if self.color == color {
-            return;
-        }
-        self.push();
-        self.color = color;
-    }
-
-    fn push_text(&mut self, text: &str) {
-        self.text.push_str(if self.did_skip {
-            self.did_skip = false;
-            text.trim_start()
-        } else {
-            text
-        });
-    }
-}
-
-fn parse_text(text: &str, output: &mut Vec<TextOutput>) -> anyhow::Result<()> {
-    let mut reader = quick_xml::reader::Reader::from_str(text);
-    let mut writer = TextAccumulator::new(output);
-    let mut buf = Vec::new();
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Err(e) => panic!("Error at position {}: {:?}", reader.error_position(), e),
-            // exits the loop when reaching end of file
-            Ok(Event::Eof) => {
-                // Make sure the content ends in a newline.
-                writer.push_text("\n");
-                break;
-            }
-
-            Ok(Event::Start(e)) => match e.name().as_ref() {
-                b"thought" => {
-                    writer.push_tag(TagType::Thought);
-                }
-                b"followup" => {
-                    writer.push_tag(TagType::Followup);
-                }
-                b"text" => {
-                    writer.push_tag(TagType::Text);
-                }
-                b"bold" => {
-                    writer.set_bold(true);
-                }
-                b"italic" => {
-                    writer.set_italic(true);
-                }
-                b"red" => {
-                    writer.set_color(Some("red".to_string()));
-                }
-                b"green" => {
-                    writer.set_color(Some("green".to_string()));
-                }
-                b"yellow" => {
-                    writer.set_color(Some("yellow".to_string()));
-                }
-                _ => writer.push_text(&format!("<{}>", std::str::from_utf8(&e).unwrap())),
-            },
-            Ok(Event::End(e)) => match e.name().as_ref() {
-                b"thought" => {
-                    writer.pop_tag_of_type(TagType::Thought)?;
-                }
-                b"followup" => {
-                    writer.pop_tag_of_type(TagType::Followup)?;
-                }
-                b"text" => {
-                    writer.pop_tag_of_type(TagType::Text)?;
-                }
-                b"bold" => {
-                    writer.set_bold(false);
-                }
-                b"italic" => {
-                    writer.set_italic(false);
-                }
-                b"red" | b"green" | b"yellow" => {
-                    writer.set_color(None);
-                }
-                _ => writer.push_text(&format!("</{}>", std::str::from_utf8(&e).unwrap())),
-            },
-            Ok(e) => writer.push_text(std::str::from_utf8(&e).unwrap()),
-        }
-
-        buf.clear();
-    }
-
-    // Make sure any remaining content is flushed
-    writer.push();
-
-    Ok(())
-}
-
 /// Convert an Anthropic response to the internal response representation.
 fn anthropic_to_internal(response: AnthropicResponse) -> anyhow::Result<LlmResponse> {
     let mut text_blocks = Vec::with_capacity(2);
-    let mut raw_text = Vec::with_capacity(2);
     let mut tool_invocations = Vec::new();
 
     for content_block in response.content {
         match content_block {
             AnthropicContentBlock::Text { text } => {
-                raw_text.push(text.clone());
-                parse_text(&text, &mut text_blocks)?;
+                crate::response_parsing::parse_text(&text, &mut text_blocks)?;
             }
             AnthropicContentBlock::ToolUse { id, name, input } => {
                 tool_invocations.push(ToolInvocation { id, name, input });
@@ -317,18 +134,58 @@ fn anthropic_to_internal(response: AnthropicResponse) -> anyhow::Result<LlmRespo
 
     Ok(LlmResponse {
         text: text_blocks,
-        raw_text,
         tool_invocations,
     })
 }
 
-impl AnthropicClient {
+impl crate::llm_client::LlmQuery for AnthropicQuery {
+    fn create_query(system_prompt: String) -> Self {
+        let mut tool_map = std::collections::HashMap::<String, _>::new();
+        let mut tool_definitions = vec![];
+        for tool in crate::tools::rust_tools::get_rust_tools() {
+            let definition = tool.get_definition();
+            tool_map.insert(definition.name.to_string(), tool);
+            tool_definitions.push(definition);
+        }
+
+        AnthropicQuery {
+            messages: Vec::with_capacity(1),
+            system: Some(system_prompt),
+            tools: tool_definitions,
+            stream: false,
+            ..Default::default()
+        }
+    }
+
+    fn add_question(&mut self, question: String) {
+        self.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: TextOrContentVector::Text(question),
+        });
+    }
+
+    fn add_tool_results(&mut self, tool_results: Vec<(String, String)>) {
+        let mut user_content = Vec::with_capacity(tool_results.len());
+        for (invocation_id, tool_response) in tool_results {
+            user_content.push(AnthropicContentBlock::ToolResult {
+                tool_use_id: invocation_id,
+                content: tool_response,
+            });
+        }
+
+        self.messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: TextOrContentVector::Content(user_content),
+        });
+    }
+}
+
+impl crate::llm_client::LlmClient for AnthropicClient {
+    type Query = AnthropicQuery;
+
     /// Query the Anthropic API.
-    pub async fn query_anthropic(
-        self: std::sync::Arc<Self>,
-        mut query: AnthropicQuery,
-    ) -> anyhow::Result<(LlmResponse, AnthropicQuery)> {
-        if tracing::enabled!(tracing::Level::INFO) {
+    async fn query(&self, mut query: Self::Query) -> anyhow::Result<(LlmResponse, Self::Query)> {
+        if tracing::enabled!(tracing::Level::DEBUG) {
             if let Ok(serialized_query) =
                 serde_json::to_string_pretty(&query).context("Serializing query")
             {
@@ -338,7 +195,7 @@ impl AnthropicClient {
 
         let client = reqwest::Client::new();
         let response = client
-            .post(&format!("{}/v1/messages", self.base_url))
+            .post(format!("{}/v1/messages", self.base_url))
             .header("x-api-key", &self.token)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
@@ -366,7 +223,6 @@ impl AnthropicClient {
             content: TextOrContentVector::Content(response.content.clone()),
         });
 
-        let internal_response = anthropic_to_internal(response)?;
-        Ok((internal_response, query))
+        Ok((anthropic_to_internal(response)?, query))
     }
 }

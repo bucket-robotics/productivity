@@ -126,6 +126,7 @@ dependencies = [
  "chrono",
  "console",
  "dialoguer",
+ "directories",
  "indicatif",
  "open",
  "productivity_config",

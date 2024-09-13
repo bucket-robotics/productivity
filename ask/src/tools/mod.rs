@@ -34,6 +34,24 @@ pub struct ToolPrerequisites {
     pub binaries: Vec<String>,
 }
 
+impl ToolPrerequisites {
+    /// Check if the prerequisites are satisfied.
+    pub fn is_satisfied(&self) -> Result<(), String> {
+        let mut errors = vec![];
+        for binary in &self.binaries {
+            if which::which(binary).is_err() {
+                errors.push(format!("{} is not present on the system", &binary));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("\n"))
+        }
+    }
+}
+
 /// A tool that the LLMs can run.
 ///
 /// For tools implemented inside this binary in Rust use the `RustTool` trait.
@@ -102,9 +120,11 @@ where
                     format!("Converting the input JSON to {tool_name}'s input struct")
                 })?;
 
-            self.run(input)
-                .await
-                .with_context(|| format!("Running the {tool_name} tool"))
+            let result = self.run(input).await;
+            if let Err(ref err) = &result {
+                tracing::error!("Error running the {tool_name} tool: {err}");
+            }
+            result
         })
     }
 }

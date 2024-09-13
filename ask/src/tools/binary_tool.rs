@@ -103,9 +103,12 @@ impl RustTool for BinaryTool {
                 .stderr(std::process::Stdio::inherit());
         };
 
+        let working_directory = crate::path_utils::expand_path(
+            input.working_directory.clone().unwrap_or_default().as_str(),
+        )?;
         let output = base_command
             .args(input.arguments)
-            .current_dir(input.working_directory.unwrap_or_default())
+            .current_dir(working_directory)
             .output()
             .context("Failed to execute process")?;
 

@@ -32,13 +32,16 @@ impl RustTool for TerraformPlanTool {
 
     async fn run(self: std::sync::Arc<Self>, input: Self::Input) -> anyhow::Result<String> {
         let mut base_command = std::process::Command::new("terraform");
+        let working_directory = crate::path_utils::expand_path(
+            input.working_directory.clone().unwrap_or_default().as_str(),
+        )?;
         let output = base_command
+            .arg(format!("-chdir={working_directory}"))
             .arg("plan")
             .arg("-detailed-exitcode")
             .arg("-no-color")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .current_dir(input.working_directory.unwrap_or_default())
             .output()
             .context("Failed to execute terraform plan")?;
 

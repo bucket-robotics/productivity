@@ -1,14 +1,17 @@
 use std::sync::Arc;
 
-use anthropic_client::TextOrContentVector;
 use anyhow::Context;
 use argh::FromArgs;
 
+use llm_client::{LlmClient, LlmQuery};
+use ollama::OllamaClient;
+
 mod anthropic_client;
 mod host_info;
-mod llm_response;
+mod llm_client;
 mod ollama;
-mod printer;
+mod path_utils;
+mod response_parsing;
 mod tools;
 
 #[derive(FromArgs)]
@@ -107,6 +110,13 @@ Plan:
         ));
     }
 
+    if let Some(user_dirs) = directories::UserDirs::new() {
+        environment.push(format!(
+            "The user's home directory is {}.",
+            user_dirs.home_dir().display()
+        ));
+    }
+
     if let Ok(current_desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
         environment.push(format!(
             "The user's desktop environment is {current_desktop}."
@@ -132,22 +142,11 @@ Plan:
     )
 }
 
-async fn actual_main(ask: Ask) -> anyhow::Result<()> {
-    let config = productivity_config::Config::get_or_default().context("Reading config")?;
-    let client = std::sync::Arc::new(anthropic_client::AnthropicClient {
-        base_url: config.get_anthropic_url_base(),
-        token: if let Some(token) = config.get_anthropic_api_key() {
-            token
-        } else {
-            anyhow::bail!(
-                "Anthropic API key is not set - configure it in {}",
-                config
-                    .config_file_path
-                    .unwrap_or_else(|| String::from("the config file"))
-            );
-        },
-    });
-
+async fn actual_main<C: LlmClient>(
+    client: C,
+    config: &productivity_config::Config,
+    ask: Ask,
+) -> anyhow::Result<()> {
     let mut tool_map = std::collections::HashMap::<String, Arc<dyn tools::Tool>>::new();
     let mut tool_definitions = vec![];
     for tool in tools::rust_tools::get_rust_tools() {
@@ -156,25 +155,14 @@ async fn actual_main(ask: Ask) -> anyhow::Result<()> {
         tool_definitions.push(definition);
     }
 
-    let mut original_query = anthropic_client::AnthropicQuery {
-        messages: vec![anthropic_client::AnthropicMessage {
-            role: "user".to_string(),
-            content: TextOrContentVector::Text(ask.question.join(" ")),
-        }],
-        system: Some(get_system_prompt(&config)),
-        tools: tool_definitions,
-        stream: false,
-        ..Default::default()
-    };
+    let mut original_query = C::Query::create_query(get_system_prompt(config));
+    original_query.add_question(ask.question.join(" "));
 
     let mut new_message = true;
     while new_message {
         new_message = false;
 
-        let (response, mut new_query) = client
-            .clone()
-            .query_anthropic(original_query.clone())
-            .await?;
+        let (response, mut new_query) = client.query(original_query.clone()).await?;
 
         // Print the communication
         for content in &response.text {
@@ -184,23 +172,29 @@ async fn actual_main(ask: Ask) -> anyhow::Result<()> {
         // If tool use is requested then run the tools and send a new message
         if !response.tool_invocations.is_empty() {
             println!("----------");
-            let mut user_content = Vec::with_capacity(response.tool_invocations.len());
+            let mut tool_pairs = Vec::with_capacity(response.tool_invocations.len());
             for invocation in response.tool_invocations {
+                if tracing::enabled!(tracing::Level::INFO) {
+                    if let Ok(serialized_input) = serde_json::to_string_pretty(&invocation.input)
+                        .context("Serializing tool input")
+                    {
+                        tracing::info!("Calling {} with:\n{}", &invocation.name, serialized_input);
+                    }
+                }
+
                 let tool = tool_map
                     .get(&invocation.name)
                     .context("Tool not found")?
                     .clone();
-                let tool_response = tool.run(invocation.input).await?;
-                user_content.push(anthropic_client::AnthropicContentBlock::ToolResult {
-                    tool_use_id: invocation.id,
-                    content: tool_response,
-                });
+                let tool_response = if let Err(message) = tool.get_prequisites().is_satisfied() {
+                    format!("Could not run {}:\n{message}", &invocation.name)
+                } else {
+                    tool.run(invocation.input).await?
+                };
+                tool_pairs.push((invocation.id, tool_response));
             }
 
-            new_query.messages.push(anthropic_client::AnthropicMessage {
-                role: "user".to_string(),
-                content: TextOrContentVector::Content(user_content),
-            });
+            new_query.add_tool_results(tool_pairs);
 
             // Send a new message with the tool results
             new_message = true;
@@ -237,7 +231,7 @@ fn set_up_tracing(verbose: bool) {
         .init();
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let ask: Ask = argh::from_env();
     set_up_tracing(ask.verbose);
 
@@ -251,8 +245,40 @@ fn main() {
         .build()
         .unwrap();
 
-    if let Err(e) = runtime.block_on(actual_main(ask)) {
+    let config = productivity_config::Config::get_or_default().context("Reading config")?;
+    let result = match &config.llm_provider {
+        productivity_config::LlmProvider::Ollama { model, .. } => {
+            let ollama_client = OllamaClient {
+                base_url: config.llm_provider.get_url_base().to_string(),
+                model: model.clone().unwrap_or_else(|| String::from("llama3.1:8b")),
+            };
+            runtime.block_on(actual_main(ollama_client, &config, ask))
+        }
+        productivity_config::LlmProvider::Anthropic { api_key } => {
+            if api_key.is_empty() {
+                anyhow::bail!(
+                    "Anthropic API key is not set - configure it in {}",
+                    config
+                        .config_file_path
+                        .as_deref()
+                        .unwrap_or("the config file")
+                );
+            }
+            runtime.block_on(actual_main(
+                anthropic_client::AnthropicClient {
+                    base_url: config.llm_provider.get_url_base().to_string(),
+                    token: api_key.to_string(),
+                },
+                &config,
+                ask,
+            ))
+        }
+    };
+
+    if let Err(e) = result {
         tracing::error!("Error: {}", e);
         std::process::exit(1);
     }
+
+    Ok(())
 }
