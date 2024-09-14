@@ -43,56 +43,22 @@ fn get_system_prompt(settings: &productivity_config::Config) -> String {
 7. Think step by step.
 8. Information about the user's environment is available in the <environment> tags, use tools when necessary to gather more information.
 9. When a README.md file is present in a directory a user mentions or a directory that is relevant, it should be read to gather context.
-10. Act as if you are a tool, not a person, omit all pleasantries, do not thank the user, never apologize, use the <example> tags to learn what good responses look like.
-<example>
-<environment>The user's current directory is /foo</environment>
-<question>Update my dependencies</question>
-<thought>
-Plan:
-1. Find files listing dependencies.
-2. Read files listing dependencies.
-3. Check the versions of the dependencies.
-4. Write the new versions to the files that specify dependencies.
-</thought>
-<green>Plan:</green> Read <italic>/foo</italic> -> Read files -> Check versions -> Write files
-</example>
-<example>
-<environment>The user's current directory is /home/bob/proj</environment>
-<question>What's in this dir?</question>
-<thought>
-Plan:
-1. Use a tool to list files in /home/bob/proj
-</thought>
-<green>Plan:</green> Read <italic>/home/bob/proj</italic>
-📁 proj
-  📄 package.json
-  📁 src
-  📄 README.md
-</example>
+10. Act as if you are a tool, not a person, omit all pleasantries, do not thank the user, never apologize.
 "
         .trim()
         .to_string(),
     );
-    formatting.push(r#"
-        Format your responses for terminal readability and use ASCII-based formatting.
-        Structure your thoughts XML, wrap thoughts in "<thought>" tags, follow up questions in "<followup>" tags, and everything else in "<text>" tags.
-        If you have successfully accomplished the task the user gave you then include a "<success/>" tag in your last response, if not include a "<failure/>" tag.
+    formatting.push(r"
+        Format your responses for terminal readability.
+        use Markdown formatting in your responses, start your message with your thoughts, put your thoughts under a Markdown '# Thoughts' heading, put your planning under a Markdown '# Plan' heading, use other Markdown headings such as '# Result' or '# Error' as needed, do not use ':' at the end of headings.
+        Use italic text to highlight file paths, commands, and tool names in your output.
+        Use bold text if you want the user to pay particular attention to something,
         Use ASCII art for diagrams.
         Use UTF-8 emojis to make things more fun or to draw the user's attention to sections of output.
-    "#.trim().to_string());
+    ".trim().to_string());
     formatting.push(format!(
         "The width of the user's terminal is {terminal_width} characters."
     ));
-
-    if console::colors_enabled() {
-        formatting.push("The user's terminal supports ANSI colors - can you use \"<red>\", \"<green>\", or \"<yellow>\" to color text, use colors to increase legibility, use red only to indicate errors.".to_string());
-        formatting.push(
-            "You can use XML tags to make text bold or italic, \"<bold>\" will make text bold and \"<italic>\" will make text italic.".to_string(),
-        );
-        formatting.push(
-            "Use italic text to highlight file paths, commands, and tool names in your output. Use bold text if you want the user to pay particular attention to something.".to_string(),
-        );
-    }
 
     environment.push(format!(
         "The user's operating system is {} and their CPU architecture is {}.",
@@ -135,7 +101,7 @@ Plan:
     }
 
     format!(
-        "<instruction>{}</instruction>\n<formatting>{}</formatting>\n<environment>{}</environment>",
+        "{}\n{}\n{}",
         instructions.join("\n"),
         formatting.join("\n"),
         environment.join("\n"),
@@ -159,6 +125,8 @@ async fn actual_main<C: LlmClient>(
     original_query.add_question(ask.question.join(" "));
 
     let mut new_message = true;
+    let printer = response_parsing::Printer::new();
+
     while new_message {
         new_message = false;
 
@@ -166,7 +134,7 @@ async fn actual_main<C: LlmClient>(
 
         // Print the communication
         for content in &response.text {
-            print!("{}", content.get_terminal_style().apply_to(&content.text));
+            printer.print(content);
         }
 
         // If tool use is requested then run the tools and send a new message
@@ -202,9 +170,6 @@ async fn actual_main<C: LlmClient>(
 
         original_query = new_query;
     }
-
-    // Make sure the output ends in a newline
-    println!();
 
     Ok(())
 }

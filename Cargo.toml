@@ -37,3 +37,7 @@ tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 indicatif = "0.17.8"
 quick-xml = "0.36.1"
+pulldown-cmark = { version = "0.12.1", default-features = false }
+syntect = { version = "=5.2.0", default-features = false, features = [
+    "default-fancy",
+] }

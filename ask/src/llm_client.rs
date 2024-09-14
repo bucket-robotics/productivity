@@ -1,24 +1,11 @@
 /// A text output section.
-pub struct TextOutput {
-    pub bold: bool,
-    pub italic: bool,
-    pub color: Option<String>,
-    pub text: String,
-}
-
-impl TextOutput {
-    pub fn get_terminal_style(&self) -> console::Style {
-        let mut style = console::Style::new();
-        style = if self.bold { style.bold() } else { style };
-        style = if self.italic { style.italic() } else { style };
-        style = match self.color.as_deref() {
-            Some("red") => style.red(),
-            Some("yellow") => style.yellow(),
-            Some("green") => style.green(),
-            _ => style,
-        };
-        style
-    }
+pub enum TextOutput {
+    Text(String),
+    Bold(String),
+    Italic(String),
+    InlineCode(String),
+    CodeBlock { language: String, content: String },
+    Newline,
 }
 
 /// A tool invocation.
