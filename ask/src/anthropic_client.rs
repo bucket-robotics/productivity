@@ -121,12 +121,12 @@ fn anthropic_to_internal(response: AnthropicResponse) -> anyhow::Result<LlmRespo
     for content_block in response.content {
         match content_block {
             AnthropicContentBlock::Text { text } => {
-                crate::response_parsing::parse_text(&text, &mut text_blocks)?;
+                crate::response_parsing::parse_text(&text, &mut text_blocks);
             }
             AnthropicContentBlock::ToolUse { id, name, input } => {
                 tool_invocations.push(ToolInvocation { id, name, input });
             }
-            _ => {
+            AnthropicContentBlock::ToolResult { .. } => {
                 anyhow::bail!("Unsupported content block: {:?}", content_block);
             }
         }

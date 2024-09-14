@@ -7,8 +7,10 @@ use anyhow::Context;
 pub mod rust_tools;
 
 mod binary_tool;
+mod cloud_context;
 mod filesystem;
 mod http_request;
+mod kubernetes;
 mod open;
 mod package_manager;
 mod software_versions;

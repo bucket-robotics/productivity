@@ -54,7 +54,7 @@ impl Printer {
     }
 }
 
-pub fn parse_text(text: &str, output: &mut Vec<TextOutput>) -> anyhow::Result<()> {
+pub fn parse_text(text: &str, output: &mut Vec<TextOutput>) {
     let mut options = pulldown_cmark::Options::empty();
     options.insert(pulldown_cmark::Options::ENABLE_GFM);
     let parser = pulldown_cmark::Parser::new_ext(text, options);
@@ -185,6 +185,4 @@ pub fn parse_text(text: &str, output: &mut Vec<TextOutput>) -> anyhow::Result<()
             }
         }
     }
-
-    Ok(())
 }

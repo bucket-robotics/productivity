@@ -68,7 +68,7 @@ fn ollama_to_internal(response: &ChatResponse) -> anyhow::Result<LlmResponse> {
     let mut tool_invocations = Vec::new();
 
     if !response.message.content.is_empty() {
-        crate::response_parsing::parse_text(&response.message.content, &mut text_blocks)?;
+        crate::response_parsing::parse_text(&response.message.content, &mut text_blocks);
     }
 
     if let Some(tool_calls) = &response.message.tool_calls {
@@ -102,7 +102,7 @@ impl crate::llm_client::LlmClient for OllamaClient {
             }
         }
 
-        query.model = self.model.clone();
+        query.model.clone_from(&self.model);
 
         let url = format!("{}/api/chat", self.base_url);
         let response = reqwest::Client::new()
